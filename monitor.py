@@ -1,0 +1,218 @@
+"""Berlin housing alert: watches Kleinanzeigen and pushes new
+listings under the price limit to Telegram.
+
+Config lives in a .env file next to this script (see .env.example).
+Without a Telegram token it runs in console-only mode (prints alerts).
+"""
+import os
+import random
+import re
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+import requests
+from bs4 import BeautifulSoup
+
+BASE_DIR = Path(__file__).resolve().parent
+
+
+# --- CONFIG ------------------------------------------------------------------
+def load_env(path: Path) -> None:
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+load_env(BASE_DIR / ".env")
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "180"))
+MIN_PRICE = int(os.environ.get("MIN_PRICE", "150"))
+MAX_PRICE = int(os.environ.get("MAX_PRICE", "500"))
+# true = first run only records current listings, alerts start with new ones
+SEED_SILENTLY = os.environ.get("SEED_SILENTLY", "false").lower() == "true"
+
+DEFAULT_URLS = [
+    # Mietwohnungen (apartments), offers only
+    f"https://www.kleinanzeigen.de/s-wohnung-mieten/berlin/anzeige:angebote/preis:{MIN_PRICE}:{MAX_PRICE}/c203l3331",
+    # Auf Zeit & WG (rooms / sublets), offers only
+    f"https://www.kleinanzeigen.de/s-auf-zeit-wg/berlin/anzeige:angebote/preis:{MIN_PRICE}:{MAX_PRICE}/c199l3331",
+]
+# Override with your own search links: comma-separated in .env
+KLEINANZEIGEN_URLS = [u.strip() for u in os.environ.get("KLEINANZEIGEN_URLS", "").split(",")
+                      if u.strip()] or DEFAULT_URLS
+
+BLOCKED_KEYWORDS = [
+    "tausch", "swap", "suche wohnung", "suche wg", "suche zimmer", "suche ein",
+    "stellplatz", "garage", "keller", "lager", "nur für frauen",
+]
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+}
+
+PRICE_RE = re.compile(r"(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?)\s*€")
+
+# Windows consoles choke on emoji otherwise
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+
+# --- STORAGE -----------------------------------------------------------------
+conn = sqlite3.connect(BASE_DIR / "seen_listings.db")
+conn.execute("CREATE TABLE IF NOT EXISTS seen (ad_id TEXT PRIMARY KEY, seen_at INTEGER)")
+conn.commit()
+
+
+def is_seen(key: str) -> bool:
+    return conn.execute("SELECT 1 FROM seen WHERE ad_id = ?", (key,)).fetchone() is not None
+
+
+def mark_seen(key: str) -> None:
+    conn.execute("INSERT OR IGNORE INTO seen VALUES (?, ?)", (key, int(time.time())))
+    conn.commit()
+
+
+def db_is_empty() -> bool:
+    return conn.execute("SELECT 1 FROM seen LIMIT 1").fetchone() is None
+
+
+# --- HELPERS -----------------------------------------------------------------
+def parse_price(text: str):
+    m = PRICE_RE.search(text or "")
+    if not m:
+        return None
+    return float(m.group(1).replace(".", "").replace(",", "."))
+
+
+def is_clean(*texts: str) -> bool:
+    combined = " ".join(texts).lower()
+    return not any(word in combined for word in BLOCKED_KEYWORDS)
+
+
+def fetch(url: str) -> BeautifulSoup:
+    resp = requests.get(url, headers=HEADERS, timeout=20)
+    resp.raise_for_status()
+    return BeautifulSoup(resp.text, "html.parser")
+
+
+def send_alert(text: str) -> bool:
+    if not (TELEGRAM_TOKEN and CHAT_ID):
+        print("\n" + text + "\n" + "-" * 40)
+        return True
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": False},
+            timeout=15,
+        )
+        if r.status_code == 429:  # Telegram rate limit
+            time.sleep(r.json().get("parameters", {}).get("retry_after", 5))
+            return False
+        if not r.ok:
+            print(f"Telegram error {r.status_code}: {r.text[:200]}")
+        return r.ok
+    except requests.RequestException as e:
+        print(f"Telegram send failed: {e}")
+        return False
+
+
+# --- SCRAPERS (each yields dicts) -------------------------------------------
+def scrape_kleinanzeigen(url: str):
+    soup = fetch(url)
+    for art in soup.select("article[data-adid]"):
+        ad_id = art.get("data-adid")
+        href = art.get("data-href")
+        title_el = art.find("h3")
+        if not (ad_id and href and title_el):
+            continue
+        location = next((s.get_text(" ", strip=True) for s in art.find_all("span")
+                         if re.match(r"\d{5}\b", s.get_text(strip=True))), "Berlin")
+        paras = [p.get_text(" ", strip=True) for p in art.find_all("p")]
+        price_text = next((p for p in paras if PRICE_RE.search(p)), "")
+        size = next((p for p in paras if "m²" in p and len(p) < 40), "")
+        desc = max(paras, key=len, default="")
+        yield {
+            "key": f"ka:{ad_id}",
+            "source": "Kleinanzeigen",
+            "title": title_el.get_text(" ", strip=True),
+            "price_text": price_text or "N/A",
+            "price": parse_price(price_text),
+            "location": location,
+            "size": size,
+            "desc": desc,
+            "link": "https://www.kleinanzeigen.de" + href,
+        }
+
+
+# --- MAIN LOOP ---------------------------------------------------------------
+def format_msg(item: dict) -> str:
+    lines = [f"🏠 New {item['source']} listing", "", f"📌 {item['title']}",
+             f"💶 {item['price_text']}", f"📍 {item['location']}"]
+    if item["size"]:
+        lines.append(f"📐 {item['size']}")
+    if item["desc"]:
+        lines.append(f"📝 {item['desc'][:180].rstrip('.… ')}…")
+    lines += ["", f"🔗 {item['link']}"]
+    return "\n".join(lines)
+
+
+def run_once(silent: bool = False) -> int:
+    sources = [(u, lambda u=u: scrape_kleinanzeigen(u)) for u in KLEINANZEIGEN_URLS]
+    sent = 0
+    for name, scraper in sources:
+        try:
+            items = list(scraper())
+        except Exception as e:
+            print(f"[{time.strftime('%H:%M:%S')}] Error fetching {name}: {e}")
+            continue
+        for item in items:
+            if is_seen(item["key"]):
+                continue
+            price = item["price"]
+            wanted = (price is None or MIN_PRICE <= price <= MAX_PRICE) and \
+                is_clean(item["title"], item["desc"])
+            if not wanted or silent:
+                mark_seen(item["key"])
+                continue
+            if send_alert(format_msg(item)):  # only mark seen once delivered
+                mark_seen(item["key"])
+                sent += 1
+                time.sleep(1)
+    return sent
+
+
+def main():
+    mode = "Telegram" if TELEGRAM_TOKEN and CHAT_ID else "console only (no TELEGRAM_TOKEN set)"
+    print(f"Monitoring {len(KLEINANZEIGEN_URLS)} Kleinanzeigen search(es), €{MIN_PRICE}-{MAX_PRICE}, "
+          f"every ~{CHECK_INTERVAL_SECONDS}s → {mode}")
+    if "--once" in sys.argv:
+        print(f"Sent {run_once()} alert(s).")
+        return
+    if SEED_SILENTLY and db_is_empty():
+        run_once(silent=True)
+        print("First run: recorded current listings silently; alerts start with new ones.")
+    if TELEGRAM_TOKEN and CHAT_ID and "--test" in sys.argv:
+        send_alert("✅ Berlin housing monitor is running.")
+    while True:
+        n = run_once()
+        print(f"[{time.strftime('%H:%M:%S')}] check done, {n} new alert(s)")
+        # jitter so requests don't arrive on an exact clock
+        time.sleep(CHECK_INTERVAL_SECONDS + random.randint(-30, 30))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Stopped.")
