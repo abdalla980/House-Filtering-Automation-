@@ -1,0 +1,66 @@
+name: housing-monitor
+# Every 5 minutes: one Kleinanzeigen check, new listings go to Telegram.
+# The seen-listings DB is carried between runs via the Actions cache.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write   # to keep the schedule enabled (see last step)
+
+concurrency:
+  group: housing-monitor   # never two checks at once -> no duplicate alerts
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -q -r requirements.txt
+
+      - name: Restore seen listings
+        uses: actions/cache/restore@v4
+        with:
+          path: seen_listings.db
+          key: seen-${{ github.run_id }}
+          restore-keys: seen-
+
+      - name: Check Kleinanzeigen
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PYTHONIOENCODING: utf-8
+        run: python monitor.py --once
+
+      - name: Save seen listings
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: seen_listings.db
+          key: seen-${{ github.run_id }}
+
+      - name: Prune old caches (keep newest 5)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list -R "$GITHUB_REPOSITORY" --key seen- --sort created_at --order desc \
+            --limit 100 --json id -q '.[5:][].id' | xargs -r -n1 gh cache delete -R "$GITHUB_REPOSITORY" || true
+
+      # GitHub pauses scheduled workflows after 60 days without repo activity;
+      # re-enabling via the API resets that, so the monitor never silently stops.
+      - name: Keep schedule alive
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow enable housing-monitor -R "$GITHUB_REPOSITORY" || true

@@ -236,6 +236,8 @@ def main():
     log(f"Monitoring {len(KLEINANZEIGEN_URLS)} Kleinanzeigen search(es), €{MIN_PRICE}-{MAX_PRICE}, "
         f"every ~{CHECK_INTERVAL_SECONDS}s → {mode}")
     if "--once" in sys.argv:
+        if os.environ.get("GITHUB_ACTIONS") and not telegram:
+            sys.exit("TELEGRAM_TOKEN / TELEGRAM_CHAT_ID secrets missing - refusing to run.")
         log(f"Sent {run_once()} alert(s).")
         return
     global _lock  # keep the socket alive for the whole process
