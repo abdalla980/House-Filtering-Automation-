@@ -7,6 +7,7 @@ Without a Telegram token it runs in console-only mode (prints alerts).
 import os
 import random
 import re
+import socket
 import sqlite3
 import sys
 import time
@@ -88,6 +89,22 @@ def db_is_empty() -> bool:
 
 
 # --- HELPERS -----------------------------------------------------------------
+LOG_FILE = BASE_DIR / "monitor.log"
+
+
+def log(msg: str) -> None:
+    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    if sys.stdout:  # None when running headless via pythonw
+        print(line)
+    try:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > 2_000_000:
+            LOG_FILE.replace(LOG_FILE.with_suffix(".log.old"))
+        with LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
 def parse_price(text: str):
     m = PRICE_RE.search(text or "")
     if not m:
@@ -120,11 +137,29 @@ def send_alert(text: str) -> bool:
             time.sleep(r.json().get("parameters", {}).get("retry_after", 5))
             return False
         if not r.ok:
-            print(f"Telegram error {r.status_code}: {r.text[:200]}")
+            log(f"Telegram error {r.status_code}: {r.text[:200]}")
         return r.ok
     except requests.RequestException as e:
-        print(f"Telegram send failed: {e}")
+        log(f"Telegram send failed: {e}")
         return False
+
+
+def setup_chat_id() -> None:
+    """Read the chat id of whoever last messaged the bot and store it in .env."""
+    if not TELEGRAM_TOKEN:
+        sys.exit("Put TELEGRAM_TOKEN in .env first.")
+    r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates", timeout=15)
+    r.raise_for_status()
+    chats = [u["message"]["chat"] for u in r.json().get("result", []) if "message" in u]
+    if not chats:
+        sys.exit("No messages found. Send your bot any message in Telegram, then rerun.")
+    chat_id = str(chats[-1]["id"])
+    env = BASE_DIR / ".env"
+    lines = env.read_text(encoding="utf-8").splitlines() if env.exists() else []
+    lines = [ln for ln in lines if not ln.startswith("TELEGRAM_CHAT_ID=")]
+    lines.append(f"TELEGRAM_CHAT_ID={chat_id}")
+    env.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"Saved TELEGRAM_CHAT_ID={chat_id} ({chats[-1].get('first_name', '')}) to .env")
 
 
 # --- SCRAPERS (each yields dicts) -------------------------------------------
@@ -174,7 +209,7 @@ def run_once(silent: bool = False) -> int:
         try:
             items = list(scraper())
         except Exception as e:
-            print(f"[{time.strftime('%H:%M:%S')}] Error fetching {name}: {e}")
+            log(f"Error fetching {name}: {e}")
             continue
         for item in items:
             if is_seen(item["key"]):
@@ -193,26 +228,44 @@ def run_once(silent: bool = False) -> int:
 
 
 def main():
-    mode = "Telegram" if TELEGRAM_TOKEN and CHAT_ID else "console only (no TELEGRAM_TOKEN set)"
-    print(f"Monitoring {len(KLEINANZEIGEN_URLS)} Kleinanzeigen search(es), €{MIN_PRICE}-{MAX_PRICE}, "
-          f"every ~{CHECK_INTERVAL_SECONDS}s → {mode}")
-    if "--once" in sys.argv:
-        print(f"Sent {run_once()} alert(s).")
+    if "--setup-chat" in sys.argv:
+        setup_chat_id()
         return
+    telegram = bool(TELEGRAM_TOKEN and CHAT_ID)
+    mode = "Telegram" if telegram else "console only (no TELEGRAM_TOKEN/CHAT_ID set)"
+    log(f"Monitoring {len(KLEINANZEIGEN_URLS)} Kleinanzeigen search(es), €{MIN_PRICE}-{MAX_PRICE}, "
+        f"every ~{CHECK_INTERVAL_SECONDS}s → {mode}")
+    if "--once" in sys.argv:
+        log(f"Sent {run_once()} alert(s).")
+        return
+    global _lock  # keep the socket alive for the whole process
+    _lock = socket.socket()
+    try:
+        _lock.bind(("127.0.0.1", 47831))
+    except OSError:
+        log("Another monitor instance is already running. Exiting.")
+        sys.exit(0)
+    if not telegram and not sys.stdout:
+        log("Headless run without Telegram credentials: nothing would reach you. Exiting.")
+        sys.exit(1)
     if SEED_SILENTLY and db_is_empty():
         run_once(silent=True)
-        print("First run: recorded current listings silently; alerts start with new ones.")
-    if TELEGRAM_TOKEN and CHAT_ID and "--test" in sys.argv:
-        send_alert("✅ Berlin housing monitor is running.")
+        log("First run: recorded current listings silently; alerts start with new ones.")
+    if telegram:
+        send_alert(f"✅ Berlin housing monitor started — watching {len(KLEINANZEIGEN_URLS)} "
+                   f"search(es), €{MIN_PRICE}-{MAX_PRICE}.")
     while True:
-        n = run_once()
-        print(f"[{time.strftime('%H:%M:%S')}] check done, {n} new alert(s)")
+        try:
+            n = run_once()
+            log(f"check done, {n} new alert(s)")
+        except Exception as e:  # never let one bad check kill the 24/7 loop
+            log(f"Unexpected error during check: {e!r}")
         # jitter so requests don't arrive on an exact clock
-        time.sleep(CHECK_INTERVAL_SECONDS + random.randint(-30, 30))
+        time.sleep(max(60, CHECK_INTERVAL_SECONDS + random.randint(-30, 30)))
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("Stopped.")
+        log("Stopped.")

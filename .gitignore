@@ -1,4 +1,5 @@
 .env
 seen_listings.db
+monitor.log*
 __pycache__/
 .idea/
