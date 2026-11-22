@@ -47,6 +47,12 @@ DEFAULT_URLS = [
     # Auf Zeit & WG (rooms / sublets), offers only
     f"https://www.kleinanzeigen.de/s-auf-zeit-wg/berlin/anzeige:angebote/preis:{MIN_PRICE}:{MAX_PRICE}/c199l3331",
 ]
+# 1-Zimmer flats may cost a bit more (own price cap)
+ONE_ROOM_MAX_PRICE = int(os.environ.get("ONE_ROOM_MAX_PRICE", "550"))
+ONE_ROOM_URL = (f"https://www.kleinanzeigen.de/s-wohnung-mieten/berlin/anzeige:angebote/"
+                f"preis:{MIN_PRICE}:{ONE_ROOM_MAX_PRICE}/c203l3331+wohnung_mieten.zimmer_d:1,1")
+DEFAULT_URLS.insert(0, ONE_ROOM_URL)  # first, so a 501-550 1-Zimmer isn't marked seen by another search
+PRICE_CAPS = {ONE_ROOM_URL: ONE_ROOM_MAX_PRICE}  # every other search uses MAX_PRICE
 # Override with your own search links: comma-separated in .env
 KLEINANZEIGEN_URLS = [u.strip() for u in os.environ.get("KLEINANZEIGEN_URLS", "").split(",")
                       if u.strip()] or DEFAULT_URLS
@@ -60,7 +66,9 @@ SHORT_TERM_RE = re.compile(
     r"zwischenmiet|\bauf zeit\b|(?<!un)befristet|sublet|short[- ]?term|kurzzeit|temporär|temporary"
     r"|wochenende|weekend|ferienwohnung|holiday|monteur|winterschlaf|über den winter|for the winter"
     r"|\b\d+\s*(?:tage|wochen|days|weeks)\b|\b(?:für|for)\s+\d+\s*(?:monate|months)\b"
-    r"|\b\d{1,2}\.(?:\d{1,2}\.?)?(?:\d{2,4})?\s*(?:-|–|bis)\s*\d{1,2}\.\d{1,2}", re.I)
+    r"|\b\d{1,2}\.(?:\d{1,2}\.?)?(?:\d{2,4})?\s*(?:-|–|bis)\s*\d{1,2}\.\d{1,2}"
+    r"|\b(?:jan|feb|m[äa]r|apr|ma[iy]|jun|jul|aug|sep|o[ck]t|nov|de[cz])[a-zä]*\.?\s*(?:\d{4}\s*)?"
+    r"(?:&|and|und|-|–|bis|to|until)\s*(?:jan|feb|m[äa]r|apr|ma[iy]|jun|jul|aug|sep|o[ck]t|nov|de[cz])", re.I)
 # No women-only offers
 WOMEN_ONLY_RE = re.compile(
     r"nur\s+(?:für\s+|an\s+)?(?:frauen|frau|mädchen|studentinnen)|an eine frau|mitbewohnerin|weiblich"
@@ -226,7 +234,8 @@ def run_once(silent: bool = False) -> int:
             if is_seen(item["key"]):
                 continue
             price = item["price"]
-            wanted = (price is None or MIN_PRICE <= price <= MAX_PRICE) and \
+            cap = PRICE_CAPS.get(name, MAX_PRICE)
+            wanted = (price is None or MIN_PRICE <= price <= cap) and \
                 is_clean(item["title"], item["desc"])
             if not wanted or silent:
                 mark_seen(item["key"])
