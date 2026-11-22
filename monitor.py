@@ -55,6 +55,16 @@ BLOCKED_KEYWORDS = [
     "tausch", "swap", "suche wohnung", "suche wg", "suche zimmer", "suche ein",
     "stellplatz", "garage", "keller", "lager", "nur für frauen",
 ]
+# No short-term lets (careful: must not hit "Etage" or "unbefristet")
+SHORT_TERM_RE = re.compile(
+    r"zwischenmiet|\bauf zeit\b|(?<!un)befristet|sublet|short[- ]?term|kurzzeit|temporär|temporary"
+    r"|wochenende|weekend|ferienwohnung|holiday|monteur|winterschlaf|über den winter|for the winter"
+    r"|\b\d+\s*(?:tage|wochen|days|weeks)\b|\b(?:für|for)\s+\d+\s*(?:monate|months)\b"
+    r"|\b\d{1,2}\.(?:\d{1,2}\.?)?(?:\d{2,4})?\s*(?:-|–|bis)\s*\d{1,2}\.\d{1,2}", re.I)
+# No women-only offers
+WOMEN_ONLY_RE = re.compile(
+    r"nur\s+(?:für\s+|an\s+)?(?:frauen|frau|mädchen|studentinnen)|an eine frau|mitbewohnerin|weiblich"
+    r"|female only|women only|only female|only women|flinta|frauen[- ]?wg", re.I)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -114,7 +124,8 @@ def parse_price(text: str):
 
 def is_clean(*texts: str) -> bool:
     combined = " ".join(texts).lower()
-    return not any(word in combined for word in BLOCKED_KEYWORDS)
+    return not (any(word in combined for word in BLOCKED_KEYWORDS)
+                or SHORT_TERM_RE.search(combined) or WOMEN_ONLY_RE.search(combined))
 
 
 def fetch(url: str) -> BeautifulSoup:
