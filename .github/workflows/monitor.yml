@@ -1,23 +1,27 @@
 name: housing-monitor
-# Every 5 minutes: one Kleinanzeigen check, new listings go to Telegram.
+# Each run checks Kleinanzeigen every ~5 minutes for about 5h40m, then starts
+# its own successor, so the monitor runs around the clock. (GitHub's own cron
+# only fires every few hours in practice; it is kept as a backup that
+# restarts the chain if it ever breaks.) Stop it: cancel the running run AND
+# disable the workflow, otherwise the backup cron restarts it.
 # The seen-listings DB is carried between runs via the Actions cache.
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "7 */3 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
-  actions: write   # to keep the schedule enabled (see last step)
+  actions: write   # to start the next run and keep the schedule enabled
 
 concurrency:
-  group: housing-monitor   # never two checks at once -> no duplicate alerts
+  group: housing-monitor   # never two runs at once -> no duplicate alerts
   cancel-in-progress: false
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
@@ -35,12 +39,17 @@ jobs:
           key: seen-${{ github.run_id }}
           restore-keys: seen-
 
-      - name: Check Kleinanzeigen
+      - name: Check Kleinanzeigen every ~5 minutes
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PYTHONIOENCODING: utf-8
-        run: python monitor.py --once
+        run: |
+          end=$((SECONDS + 340 * 60))
+          while [ "$SECONDS" -lt "$end" ]; do
+            python monitor.py --once || echo "check failed, retrying next round"
+            sleep $((270 + RANDOM % 60))
+          done
 
       - name: Save seen listings
         if: always()
@@ -58,9 +67,16 @@ jobs:
             --limit 100 --json id -q '.[5:][].id' | xargs -r -n1 gh cache delete -R "$GITHUB_REPOSITORY" || true
 
       # GitHub pauses scheduled workflows after 60 days without repo activity;
-      # re-enabling via the API resets that, so the monitor never silently stops.
+      # re-enabling via the API resets that, so the backup cron never silently stops.
       - name: Keep schedule alive
-        if: github.event_name == 'schedule'
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow enable housing-monitor -R "$GITHUB_REPOSITORY" || true
+
+      # Hand over to the next run (skipped when the run was cancelled on purpose).
+      - name: Start next run
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run housing-monitor -R "$GITHUB_REPOSITORY" --ref "${{ github.ref_name }}"
