@@ -1,5 +1,5 @@
 """Berlin housing alert: watches Kleinanzeigen and pushes new
-listings under the price limit to Telegram.
+listings matching the search profile (rooms, size, price, areas) to Telegram.
 
 Config lives in a .env file next to this script (see .env.example).
 Without a Telegram token it runs in console-only mode (prints alerts).
@@ -37,25 +37,40 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "180"))
 MIN_PRICE = int(os.environ.get("MIN_PRICE", "150"))
-MAX_PRICE = int(os.environ.get("MAX_PRICE", "500"))
+MAX_PRICE = int(os.environ.get("MAX_PRICE", "2000"))
+MIN_ROOMS = os.environ.get("MIN_ROOMS", "4")
+MAX_ROOMS = os.environ.get("MAX_ROOMS", "5")
+MIN_SIZE_M2 = int(os.environ.get("MIN_SIZE_M2", "85"))
 # true = first run only records current listings, alerts start with new ones
 SEED_SILENTLY = os.environ.get("SEED_SILENTLY", "false").lower() == "true"
 
+# Search profile (Morwan Hassan): 4-5 rooms, from 85 m², rent up to 2000 €.
+# Rooms (4,5 included), size and price are filtered by Kleinanzeigen itself.
 DEFAULT_URLS = [
-    # Mietwohnungen (apartments), offers only
-    f"https://www.kleinanzeigen.de/s-wohnung-mieten/berlin/anzeige:angebote/preis:{MIN_PRICE}:{MAX_PRICE}/c203l3331",
-    # Auf Zeit & WG (rooms / sublets), offers only
-    f"https://www.kleinanzeigen.de/s-auf-zeit-wg/berlin/anzeige:angebote/preis:{MIN_PRICE}:{MAX_PRICE}/c199l3331",
+    f"https://www.kleinanzeigen.de/s-wohnung-mieten/berlin/anzeige:angebote/preis:{MIN_PRICE}:{MAX_PRICE}/"
+    f"c203l3331+wohnung_mieten.qm_d:{MIN_SIZE_M2},+wohnung_mieten.zimmer_d:{MIN_ROOMS},{MAX_ROOMS}",
 ]
-# 1-Zimmer flats may cost a bit more (own price cap)
-ONE_ROOM_MAX_PRICE = int(os.environ.get("ONE_ROOM_MAX_PRICE", "550"))
-ONE_ROOM_URL = (f"https://www.kleinanzeigen.de/s-wohnung-mieten/berlin/anzeige:angebote/"
-                f"preis:{MIN_PRICE}:{ONE_ROOM_MAX_PRICE}/c203l3331+wohnung_mieten.zimmer_d:1,1")
-DEFAULT_URLS.insert(0, ONE_ROOM_URL)  # first, so a 501-550 1-Zimmer isn't marked seen by another search
-PRICE_CAPS = {ONE_ROOM_URL: ONE_ROOM_MAX_PRICE}  # every other search uses MAX_PRICE
 # Override with your own search links: comma-separated in .env
 KLEINANZEIGEN_URLS = [u.strip() for u in os.environ.get("KLEINANZEIGEN_URLS", "").split(",")
                       if u.strip()] or DEFAULT_URLS
+
+# Kleinanzeigen shows each listing's area as "PLZ Area" (e.g. "10405 Prenzlauer Berg").
+# Wanted districts: Mitte (whole district), Reinickendorf, Wilmersdorf, Schöneberg, Prenzlauer Berg.
+DEFAULT_AREAS = [
+    # Bezirk Mitte
+    "Mitte", "Tiergarten", "Moabit", "Wedding", "Gesundbrunnen", "Hansaviertel",
+    # Bezirk Reinickendorf
+    "Reinickendorf", "Tegel", "Wittenau", "Hermsdorf", "Frohnau", "Waidmannslust",
+    "Heiligensee", "Konradshöhe", "Lübars", "Märkisches Viertel", "Borsigwalde",
+    # Wilmersdorf (incl. the old Wilmersdorf district parts)
+    "Wilmersdorf", "Halensee", "Schmargendorf", "Grunewald",
+    # Schöneberg (incl. Friedenau, old Schöneberg district)
+    "Schöneberg", "Friedenau",
+    "Prenzlauer Berg",
+]
+# Override with your own list: comma-separated AREAS in .env
+AREAS = [a.strip().lower() for a in os.environ.get("AREAS", "").split(",") if a.strip()] \
+    or [a.lower() for a in DEFAULT_AREAS]
 
 BLOCKED_KEYWORDS = [
     "tausch", "swap", "suche wohnung", "suche wg", "suche zimmer", "suche ein",
@@ -134,6 +149,12 @@ def is_clean(*texts: str) -> bool:
     combined = " ".join(texts).lower()
     return not (any(word in combined for word in BLOCKED_KEYWORDS)
                 or SHORT_TERM_RE.search(combined) or WOMEN_ONLY_RE.search(combined))
+
+
+def in_wanted_area(location: str) -> bool:
+    """location looks like '10405 Prenzlauer Berg'; unknown areas are rejected."""
+    name = re.sub(r"^\d{5}\s*", "", location or "").lower()
+    return any(area in name for area in AREAS)
 
 
 def fetch(url: str) -> BeautifulSoup:
@@ -234,9 +255,8 @@ def run_once(silent: bool = False) -> int:
             if is_seen(item["key"]):
                 continue
             price = item["price"]
-            cap = PRICE_CAPS.get(name, MAX_PRICE)
-            wanted = (price is None or MIN_PRICE <= price <= cap) and \
-                is_clean(item["title"], item["desc"])
+            wanted = (price is None or MIN_PRICE <= price <= MAX_PRICE) and \
+                in_wanted_area(item["location"]) and is_clean(item["title"], item["desc"])
             if not wanted or silent:
                 mark_seen(item["key"])
                 continue
@@ -254,6 +274,7 @@ def main():
     telegram = bool(TELEGRAM_TOKEN and CHAT_ID)
     mode = "Telegram" if telegram else "console only (no TELEGRAM_TOKEN/CHAT_ID set)"
     log(f"Monitoring {len(KLEINANZEIGEN_URLS)} Kleinanzeigen search(es), €{MIN_PRICE}-{MAX_PRICE}, "
+        f"{MIN_ROOMS}-{MAX_ROOMS} rooms, from {MIN_SIZE_M2} m², {len(AREAS)} areas, "
         f"every ~{CHECK_INTERVAL_SECONDS}s → {mode}")
     if "--once" in sys.argv:
         if os.environ.get("GITHUB_ACTIONS") and not telegram:
@@ -275,7 +296,8 @@ def main():
         log("First run: recorded current listings silently; alerts start with new ones.")
     if telegram:
         send_alert(f"✅ Berlin housing monitor started — watching {len(KLEINANZEIGEN_URLS)} "
-                   f"search(es), €{MIN_PRICE}-{MAX_PRICE}.")
+                   f"search(es), €{MIN_PRICE}-{MAX_PRICE}, {MIN_ROOMS}-{MAX_ROOMS} rooms, "
+                   f"from {MIN_SIZE_M2} m².")
     while True:
         try:
             n = run_once()
