@@ -67,6 +67,23 @@ DEFAULT_AREAS = [
     # Schöneberg (incl. Friedenau, old Schöneberg district)
     "Schöneberg", "Friedenau",
     "Prenzlauer Berg",
+    # --- extra areas (added 2026-11-28) ---
+    # neighbours: Pankow/Weißensee (next to Prenzlauer Berg), Charlottenburg/Westend
+    # (next to Wilmersdorf), Tempelhof/Steglitz (next to Schöneberg)
+    "Pankow", "Weißensee", "Weissensee", "Niederschönhausen",
+    "Charlottenburg", "Westend", "Tempelhof", "Steglitz",
+    # Friedrichshain + Kreuzberg
+    "Friedrichshain", "Kreuzberg",
+    # Bezirk Spandau
+    "Spandau", "Kladow", "Gatow", "Staaken", "Siemensstadt", "Haselhorst",
+    "Hakenfelde", "Wilhelmstadt", "Falkenhagener Feld",
+    # Köpenick (incl. its south-east parts)
+    "Köpenick", "Friedrichshagen", "Rahnsdorf", "Grünau", "Müggelheim", "Schmöckwitz",
+    "Adlershof", "Altglienicke", "Bohnsdorf", "Oberschöneweide",
+    # Bezirk Neukölln
+    "Neukölln", "Britz", "Buckow", "Rudow", "Gropiusstadt",
+    # Treptow
+    "Treptow", "Plänterwald", "Baumschulenweg", "Johannisthal", "Niederschöneweide",
 ]
 # Override with your own list: comma-separated AREAS in .env
 AREAS = [a.strip().lower() for a in os.environ.get("AREAS", "").split(",") if a.strip()] \
