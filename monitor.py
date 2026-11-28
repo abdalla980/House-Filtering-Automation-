@@ -92,7 +92,12 @@ AREAS = [a.strip().lower() for a in os.environ.get("AREAS", "").split(",") if a.
 BLOCKED_KEYWORDS = [
     "tausch", "swap", "suche wohnung", "suche wg", "suche zimmer", "suche ein",
     "stellplatz", "garage", "keller", "lager", "nur für frauen",
+    "praxisraum", "praxisräume", "gewerbefläche", "gewerberaum",
+    "wohnung gesucht", "untermiete",
 ]
+# Single WG rooms (but keep whole flats that are merely "WG-geeignet")
+WG_ROOM_RE = re.compile(
+    r"\bwg[- ]?zimmer|zimmer\s+in\s+(?:einer\s+|der\s+|unserer\s+)?wg\b|\d\s*zimmer\s+wg\b|wg[- ]?gründung", re.I)
 # No short-term lets (careful: must not hit "Etage" or "unbefristet")
 SHORT_TERM_RE = re.compile(
     r"zwischenmiet|\bauf zeit\b|(?<!un)befristet|sublet|short[- ]?term|kurzzeit|temporär|temporary"
@@ -100,7 +105,7 @@ SHORT_TERM_RE = re.compile(
     r"|\b\d+\s*(?:tage|wochen|days|weeks)\b|\b(?:für|for)\s+\d+\s*(?:monate|months)\b"
     r"|\b\d{1,2}\.(?:\d{1,2}\.?)?(?:\d{2,4})?\s*(?:-|–|bis)\s*\d{1,2}\.\d{1,2}"
     r"|\b(?:jan|feb|m[äa]r|apr|ma[iy]|jun|jul|aug|sep|o[ck]t|nov|de[cz])[a-zä]*\.?\s*(?:\d{4}\s*)?"
-    r"(?:&|and|und|-|–|bis|to|until)\s*(?:jan|feb|m[äa]r|apr|ma[iy]|jun|jul|aug|sep|o[ck]t|nov|de[cz])", re.I)
+    r"(?:&|/|and|und|-|–|bis|to|until)\s*(?:jan|feb|m[äa]r|apr|ma[iy]|jun|jul|aug|sep|o[ck]t|nov|de[cz])", re.I)
 # No women-only offers
 WOMEN_ONLY_RE = re.compile(
     r"nur\s+(?:für\s+|an\s+)?(?:frauen|frau|mädchen|studentinnen)|an eine frau|mitbewohnerin|weiblich"
@@ -163,9 +168,10 @@ def parse_price(text: str):
 
 
 def is_clean(*texts: str) -> bool:
-    combined = " ".join(texts).lower()
+    combined = re.sub(r"\s+", " ", " ".join(texts).lower())
     return not (any(word in combined for word in BLOCKED_KEYWORDS)
-                or SHORT_TERM_RE.search(combined) or WOMEN_ONLY_RE.search(combined))
+                or SHORT_TERM_RE.search(combined) or WOMEN_ONLY_RE.search(combined)
+                or WG_ROOM_RE.search(combined))
 
 
 def in_wanted_area(location: str) -> bool:
